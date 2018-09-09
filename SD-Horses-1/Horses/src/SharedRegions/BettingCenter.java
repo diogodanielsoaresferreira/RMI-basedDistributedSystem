@@ -1,0 +1,310 @@
+
+package SharedRegions;
+
+import BettingHelper.*;
+import InterveningEntities.*;
+import MainProgram.*;
+import genclass.GenericIO;
+import java.util.ArrayList;
+
+/**
+ * Manages the bets from the spectators to the broker.
+ * It contains the logic necessary for a spectator to do a bet and collect the 
+ * gains and for a broker to retrieve and honour the bets made.
+ * It has a list of the bets done by the spectators, and also a list where are
+ * the ID's of all spectators that are waiting for a bet to be retrieved.
+ * 
+ * @author Diogo Ferreira
+ * @author Luís Leira
+ */
+
+public class BettingCenter {
+    
+    /**
+     * Logger class for debugging.
+     */
+    private LoggerInterface logger;
+    
+    /**
+     * True if the broker is waiting for bets, false otherwise.
+     * If is false, the spectator must wait before doing a bet.
+     */
+    private boolean waitingForBets = false;
+    
+    /**
+     * Number of spectators that have bet in a race.
+     */
+    private int spectatorsBet = 0;
+    
+    /**
+     * List of bets of the spectators.
+     * Everytime a spectator does a bet, adds him to this list.
+     * The broker reads the list and honours the bets that have won money.
+     */
+    private final ArrayList<Bet> spectatorBetList = new ArrayList<>();
+    
+    /**
+     * ID of the spectators to collect gains.
+     * When a spectator comes to retrieve the bets, it adds his id to this list,
+     * and waits for the broker to honour the bets.
+     */
+    private final ArrayList<Integer> spectatorsToRetrieveBet = new ArrayList<>();
+    
+    /**
+     * Number of bets that the broker has accepted in a race.
+     */
+    private int brokerBets = 0;
+    
+    /**
+     * Bet ammount collected by the broker.
+     * Bet ammount that is passed by the broker to the spectator on a winning bet.
+     */
+    private int betAmmount = -1;
+    
+    /**
+     * Method used by the broker to accept all the bets from the spectators.
+     * Changes the state of the broker to WAITING_FOR_BETS.
+     * Waits for each spectator to come to the betting center and retrieves
+     * the bets made by them.
+     * Only returns when all spectators made his bets.
+     */
+    public synchronized void acceptTheBets(){
+        Broker broker = (Broker)Thread.currentThread();
+        broker.setBrokerState(BrokerState.WAITING_FOR_BETS);
+        logger.updateBrokerState(BrokerState.WAITING_FOR_BETS);
+        
+        spectatorBetList.clear();
+        
+        /**
+         * Wait for a bet of every spectator, and then block again
+         * Only stops when all spectators have bet.
+         */
+        for(int i=0; i<SimulationParameters.N_SPECTATORS; i++){
+            
+            /**
+             * Notifies all the spectators that the broker is waiting for bets.
+             */
+            waitingForBets = true;
+            notifyAll();
+            
+            /** 
+             * Waits for a bet of a spectator.
+             **/
+            while(spectatorsBet<=i){
+                try{
+                    wait();
+                } catch (InterruptedException ex) {
+                    GenericIO.writelnString("acceptTheBets - One broker thread was interrupted.");
+                    System.exit(1);
+                }
+            }
+            waitingForBets = false;
+            
+            /** 
+             * Accept the bet and notify the spectator.
+             */
+            brokerBets += 1;
+            notifyAll();
+        }
+        
+    }
+    
+    
+    /**
+     * The broker gives the reward to the winning bets.
+     * This methos is called by the broker, and changes his state to
+     * SETTLING_ACCOUNTS.
+     * Waits for each spectator to come retrieve his bet. When they are waiting
+     * on the betting center, saves the ammount of money to give to them.
+     * Only returns when all spectators come collect their gains.
+     * @param winners list of all the horses that won the race
+     */
+    public synchronized void honourTheBets(ArrayList<HorseJockey> winners){
+        Broker broker = (Broker)Thread.currentThread();
+        broker.setBrokerState(BrokerState.SETTLING_ACCOUNTS);
+        logger.updateBrokerState(BrokerState.SETTLING_ACCOUNTS);
+        
+        ArrayList<Bet> winningBets = getWinningBets(winners);
+       
+        int i=0;
+        
+        while(i<winningBets.size()){
+
+            /**
+             * Get the bet from the spectator and give the money ammount.
+             */
+            if(spectatorsToRetrieveBet.size()>0){
+                int specID = spectatorsToRetrieveBet.get(0);
+                for(Bet bet : winningBets){
+                    /**
+                     * Get the bet from the spectator.
+                     */
+                    if(specID==bet.getSpectatorID()){ 
+                        /**
+                         * Get the money ammount of the spectator that won the bet.
+                         */
+                        betAmmount = (int) (bet.getMoney()+bet.getMoney()/winningBets.size());
+                        i++;
+                        /**
+                         * Notify the spectator that the reward is ready to be collected.
+                         */
+                        spectatorsToRetrieveBet.remove(0);
+                        notifyAll();
+                        break;
+                    }
+                }
+            }
+            else{
+                /**
+                 * Wait for bet to be collected.
+                 */
+                try{
+                    wait();
+                } catch (InterruptedException ex) {
+                    GenericIO.writelnString("honourTheBets - The broker thread was interrupted.");
+                    System.exit(1);
+                }
+            }
+            
+        }
+        
+    }
+    
+    /**
+     * Spectator places a bet.
+     * Method used by the spectators to place a bet.
+     * It changes the spectator state to PLACING_A_BET, and waits for the broker
+     * to be ready to receive bets.
+     * When the broker is ready, calculates the bet, based on his strategy, 
+     * and adds the bet to the bet list.
+     * Returns when the broker has accepted the bet.
+     * @param horses list of horses in a race
+     */
+    public synchronized void placeABet(ArrayList<HorseJockey> horses){
+        Spectator spectator = ((Spectator)Thread.currentThread());
+        spectator.setSpectatorState(SpectatorState.PLACING_A_BET);
+        logger.updateSpectatorState(spectator.getID(), SpectatorState.PLACING_A_BET);
+        
+        /**
+         * Waits by the broker when is ready to receive bets.
+         */
+        while(!waitingForBets){
+            try{
+                wait();
+            } catch (InterruptedException ex) {
+                GenericIO.writelnString("placeABet - One spectator thread was interrupted.");
+                System.exit(1);
+            }
+        }
+        
+        /**
+         * Add the bet to the list, and notify the broker.
+         */
+        Bet bet = BettingStrategy.applyStrategy(spectator.getID(), horses, spectator.getBettingStrategy(), spectator.getMoney());
+        spectator.addMoney(-bet.getMoney());
+        spectatorBetList.add(bet);
+        spectatorsBet += 1;
+        logger.updateSpectatorBet(spectator.getID(), bet.getHorseToBet().getID(), bet.getMoney());
+        notifyAll();
+        
+        
+        /** 
+         * Waits for the broker to accept the bet.
+         */
+        while(spectatorsBet != brokerBets){
+            try{
+                wait();
+            } catch (InterruptedException ex) {
+                GenericIO.writelnString("placeABet - One Spectator thread was interrupted.");
+                System.exit(1);
+            }
+        }
+        
+        /**
+         * If the broker has accepted bets from all the spectators,
+         * clear number of bets.
+         */
+        if (brokerBets==SimulationParameters.N_SPECTATORS){
+            brokerBets = 0;
+            spectatorsBet = 0;
+        }
+        
+    }
+    
+    /**
+     * Spectator collects the gains from the bets.
+     * Changes the spectator state to COLLECTING_THE_GAINS, and puts the spectator
+     * in the list of the spectators waiting to retrieve bets.
+     * When the broker has retrieved the bet, collects the gains given by the broker.
+     */
+    public synchronized void collectTheGains(){
+        Spectator spectator = (Spectator)Thread.currentThread();
+        spectator.setSpectatorState(SpectatorState.COLLECTING_THE_GAINS);
+        logger.updateSpectatorState(spectator.getID(), SpectatorState.COLLECTING_THE_GAINS);
+        
+        /**
+         * Notify the broker that the spectator is ready to retrieve the bet.
+         */
+        spectatorsToRetrieveBet.add(spectator.getID());
+        notifyAll();
+        
+        /**
+         * If he is not in the list to retrieve bets, was already called.
+         * Otherwise, he must wait by his turn.
+         */
+        while(spectatorsToRetrieveBet.stream().filter((spectatorBet) -> spectatorBet == spectator.getID()).count() != 0){
+            /**
+             * Wait for broker to honour the bets.
+             */
+            try{
+                wait();
+            } catch (InterruptedException ex) {
+                GenericIO.writelnString("collectTheGains - One Spectator thread was interrupted.");
+                System.exit(1);
+            }
+            
+        }
+        spectator.addMoney(betAmmount);
+        logger.updateSpectatorMoney(spectator.getID(), betAmmount);
+        
+    }
+    
+    
+    /**
+     * Get the list of bets from the spectators
+     * @return list of bets from the spectators
+     */
+    public synchronized ArrayList<Bet> getSpectatorBetList(){
+        return spectatorBetList;
+    }
+    
+    /**
+     * Get the winning bets of a race.
+     * @param raceWinners List of horses that have won the race
+     * @return List of the winning bets
+     */
+    private synchronized ArrayList<Bet> getWinningBets(ArrayList<HorseJockey> raceWinners){
+        ArrayList<Bet> winningBets = new ArrayList<>();
+        
+        /**
+         * For each winner horse, checks if there is any bet in that horse.
+         */
+        spectatorBetList.forEach((bet) -> {
+            raceWinners.stream().filter((horse) -> (horse.getID()==bet.getHorseToBet().getID())).forEachOrdered((_item) -> {
+                winningBets.add(bet);
+            });
+        });
+        
+        return winningBets;
+    }
+    
+    
+    /**
+     * Set the current logger
+     * @param logger Logger to be used for the entity
+     */
+    public synchronized void setLogger(LoggerInterface logger){
+        this.logger = logger;
+    }
+    
+}
